@@ -9,7 +9,7 @@ import os
 # =========================
 # MONGODB CONFIG
 # =========================
-URI = "mongodb+srv://oliver:uKQbTX8ebb1zGVFy@cluster0.cvmjitc.mongodb.net/?appName=Cluster"
+URI = os.getenv("MONGODB_URI")
 DB_NAME = "iot"
 COLLECTION_NAME = "sensordata"
 
