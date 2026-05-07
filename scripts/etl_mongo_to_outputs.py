@@ -3,8 +3,8 @@ from pymongo.server_api import ServerApi
 import psycopg2
 import pandas as pd
 import json
-import time
 import os
+from pathlib import Path
 
 # =========================
 # MONGODB CONFIG
@@ -26,12 +26,11 @@ PG_SSLMODE = "prefer"
 # =========================
 # OUTPUT CONFIG
 # =========================
-from pathlib import Path
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 OUTPUT_GEOJSON = BASE_DIR / "web" / "sensor_latest.geojson"
 OUTPUT_CSV = BASE_DIR / "data" / "sensor_latest.csv"
+
 
 def parse_float(value):
     try:
@@ -56,6 +55,7 @@ def build_geojson_point(lon, lat, alt=None):
         return None
 
     coords = [lon, lat]
+
     if alt is not None:
         coords.append(alt)
 
@@ -67,10 +67,13 @@ def build_geojson_point(lon, lat, alt=None):
 
 def valid_humidity(value):
     h = parse_float(value)
+
     if h is None:
         return None
+
     if 0 <= h <= 100:
         return h
+
     return None
 
 
@@ -78,11 +81,13 @@ def extract_tags_location(device_info):
     tags = device_info.get("tags", {}) or {}
 
     site = tags.get("site")
+
     tag_lat = parse_float(tags.get("lat"))
     tag_lon = parse_float(tags.get("lon"))
     tag_alt = parse_float(tags.get("alt"))
 
     geojson_raw = tags.get("geojson")
+
     geojson_clean = None
     lat = None
     lon = None
@@ -92,12 +97,16 @@ def extract_tags_location(device_info):
         try:
             geo = json.loads(geojson_raw)
             coords = geo.get("coordinates", [])
+
             if len(coords) >= 2:
                 lon = parse_float(coords[0])
                 lat = parse_float(coords[1])
+
                 if len(coords) >= 3:
                     alt = parse_float(coords[2])
+
                 geojson_clean = json.dumps(geo)
+
         except Exception:
             pass
 
@@ -130,11 +139,13 @@ def extract_gateway_info(doc):
 
     if rx_info and isinstance(rx_info, list):
         first_rx = rx_info[0]
+
         gateway_id = first_rx.get("gatewayId")
         rssi = first_rx.get("rssi")
         snr = first_rx.get("snr")
 
         loc = first_rx.get("location", {}) or {}
+
         gateway_lat = parse_float(loc.get("latitude"))
         gateway_lon = parse_float(loc.get("longitude"))
         gateway_alt = parse_float(loc.get("altitude"))
@@ -157,6 +168,7 @@ def extract_environmental_fields(obj, device_profile_name):
     if device_profile_name == "LSN50-V2":
         temp1 = parse_float(obj.get("TempC1"))
         temp_sht = parse_float(obj.get("TempC_SHT"))
+
         temp_c = temp1 if temp1 is not None and temp1 != 0 else temp_sht
         humidity = valid_humidity(obj.get("Hum_SHT"))
 
@@ -185,22 +197,45 @@ def extract_environmental_fields(obj, device_profile_name):
         "work_mode": obj.get("Work_mode"),
         "raw_tempc1": parse_float(obj.get("TempC1")),
         "raw_tempc_sht": parse_float(obj.get("TempC_SHT")),
-        "raw_hum_sht": parse_float(obj.get("Hum_SHT")),
+        "raw_hum_sht": parse_float(obj.get("Hum_SHT"))
     }
 
 
 def extract_tank_fields(obj, device_profile_name):
-    if not device_profile_name or "DDS75" not in device_profile_name:
-        return {
-            "tank_distance": None,
-            "tank_battery_v": None,
-            "tank_temp_c": None,
-            "interrupt_flag": None,
-            "sensor_flag": None
-        }
+    is_tank = device_profile_name and "DDS75" in device_profile_name
+
+    empty_tank_fields = {
+        "tank_air_gap_mm": None,
+        "tank_air_gap_m": None,
+        "tank_distance": None,
+        "tank_battery_v": None,
+        "tank_temp_c": None,
+        "interrupt_flag": None,
+        "sensor_flag": None
+    }
+
+    if not is_tank:
+        return empty_tank_fields
+
+    # IMPORTANT:
+    # The DDS75 tank sensor stores this as object.Distance
+    # MongoDB is case-sensitive, so Distance is not the same as distance.
+    distance = (
+        parse_float(obj.get("Distance"))
+        if parse_float(obj.get("Distance")) is not None
+        else parse_float(obj.get("distance"))
+    )
+
+    if distance is None:
+        distance = parse_float(obj.get("Distance_mm"))
+
+    if distance is None:
+        distance = parse_float(obj.get("distance_mm"))
 
     return {
-        "tank_distance": parse_float(obj.get("Distance")),
+        "tank_air_gap_mm": distance,
+        "tank_air_gap_m": distance / 1000 if distance is not None else None,
+        "tank_distance": distance,
         "tank_battery_v": parse_float(obj.get("Bat")),
         "tank_temp_c": parse_float(obj.get("TempC_DS18B20")),
         "interrupt_flag": parse_int(obj.get("Interrupt_flag")),
@@ -233,6 +268,7 @@ def extract_sensecap_fields(obj, device_profile_name):
     result["sensecap_err"] = obj.get("err")
 
     messages = obj.get("messages", [])
+
     if not isinstance(messages, list):
         return result
 
@@ -274,6 +310,7 @@ def extract_sensecap_fields(obj, device_profile_name):
 def flatten_doc(doc):
     device_info = doc.get("deviceInfo", {}) or {}
     obj = doc.get("object", {}) or {}
+
     device_profile_name = device_info.get("deviceProfileName")
 
     row = {
@@ -333,11 +370,14 @@ def fetch_latest_per_device(collection):
 
 
 def write_snapshot_csv(df):
+    OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(OUTPUT_CSV, index=False)
     print(f"Wrote latest snapshot to {OUTPUT_CSV}")
 
 
 def write_snapshot_geojson(df):
+    OUTPUT_GEOJSON.parent.mkdir(parents=True, exist_ok=True)
+
     features = []
 
     for _, row in df.iterrows():
@@ -351,6 +391,7 @@ def write_snapshot_geojson(df):
 
         for col in df.columns:
             value = row[col]
+
             if pd.isna(value):
                 properties[col] = None
             else:
@@ -431,7 +472,7 @@ def insert_into_postgis_latest(df):
         lon = row.get("sensor_longitude")
         lat = row.get("sensor_latitude")
 
-        if lon is None or lat is None:
+        if lon is None or lat is None or pd.isna(lon) or pd.isna(lat):
             print(f"Skipping {row.get('device_name')} - no sensor coordinates")
             continue
 
@@ -466,15 +507,26 @@ def print_summary(df):
     print(df["device_profile_name"].value_counts(dropna=False).to_string())
 
     print("\nLatest devices snapshot:")
+
+    cols = [
+        "device_name",
+        "device_profile_name",
+        "site",
+        "time",
+        "sensor_latitude",
+        "sensor_longitude",
+        "temperature_c",
+        "humidity",
+        "tank_air_gap_mm",
+        "tank_air_gap_m",
+        "tank_temp_c",
+        "tank_battery_v"
+    ]
+
+    existing_cols = [col for col in cols if col in df.columns]
+
     print(
-        df[[
-            "device_name",
-            "device_profile_name",
-            "site",
-            "time",
-            "sensor_latitude",
-            "sensor_longitude"
-        ]]
+        df[existing_cols]
         .drop_duplicates()
         .sort_values(["device_profile_name", "device_name"])
         .to_string(index=False)
@@ -482,8 +534,12 @@ def print_summary(df):
 
 
 def run_once():
+    if not URI:
+        raise ValueError("MONGODB_URI environment variable is not set.")
+
     client = MongoClient(URI, server_api=ServerApi("1"))
     client.admin.command("ping")
+
     print("Connected to MongoDB")
 
     db = client[DB_NAME]
