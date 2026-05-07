@@ -1,0 +1,10 @@
+device_name,dev_eui,device_profile_name,site,sensor_latitude,sensor_longitude,sensor_altitude,sensor_geojson
+LA666277834,a84041fba55fcaca,DDS75,Tank1,-38.6956,143.7737,171.0,"{""type"": ""Point"", ""coordinates"": [143.7737, -38.6956, 171.0]}"
+LA666277837,a840414c305fcacd,DDS75,Tank2,-38.6956,143.7737,171.0,"{""type"": ""Point"", ""coordinates"": [143.7737, -38.6956, 171.0]}"
+LA66N721745,a840411ca1887b91,DDS75,Tank3,-38.6956,143.7737,171.0,"{""type"": ""Point"", ""coordinates"": [143.7737, -38.6956, 171.0]}"
+LST25598095,a84041675186988f,LSN50-V2,Inside Shed,-38.6956,143.7737,171.0,"{""type"": ""Point"", ""coordinates"": [143.7737, -38.6956, 171.0]}"
+LST25502625,a84041e2a18523a1,LSN50v2-S31,Top Gate,-38.6958,143.7723,181.0,"{""type"": ""Point"", ""coordinates"": [143.7723, -38.6958, 181.0]}"
+LST25502626,ab4041cd218523a2,LSN50v2-S31,Top Paddock,-38.6958,143.775,165.0,"{""type"": ""Point"", ""coordinates"": [143.775, -38.6958, 165.0]}"
+LST25502631,a840419f918523a7,LSN50v2-S31,Gully,-38.6949,143.7737,179.0,"{""type"": ""Point"", ""coordinates"": [143.7737, -38.6949, 179.0]}"
+LST25502641,a8404142118523b1,LSN50v2-S31,Outside Shed,-38.6956,143.7737,171.0,"{""type"": ""Point"", ""coordinates"": [143.7737, -38.6956, 171.0]}"
+1254000489,2cf7f1c073400187,SenseCAP S2120,Weather Station,-38.6956,143.7732,168.0,"{""type"": ""Point"", ""coordinates"": [143.7732, -38.6956, 168.0]}"
