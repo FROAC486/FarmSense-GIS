@@ -35,22 +35,94 @@
     }
 
     #titleBox p {
-      margin: 0;
+      margin: 4px 0;
       font-size: 13px;
       line-height: 1.4;
+    }
+
+    #legendBox {
+      position: absolute;
+      bottom: 20px;
+      left: 15px;
+      background: rgba(0, 0, 0, 0.75);
+      color: white;
+      padding: 12px 16px;
+      border-radius: 8px;
+      z-index: 10;
+      width: 220px;
+    }
+
+    #legendBox h3 {
+      margin-top: 0;
+      margin-bottom: 10px;
+      font-size: 16px;
+    }
+
+    #legendBox p {
+      margin: 6px 0;
+      font-size: 13px;
+    }
+
+    .legend-dot {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin-right: 8px;
     }
   </style>
 </head>
 
 <body>
+
   <div id="cesiumContainer"></div>
 
   <div id="titleBox">
     <h2>FarmSense GIS</h2>
-    <p>Cloud-based IoT sensor monitoring for farm environmental conditions.</p>
+
+    <p>
+      Cloud-based IoT sensor monitoring for farm environmental conditions.
+    </p>
+
+    <p id="sensorCount">
+      Sensors Online: --
+    </p>
+
+    <p id="lastUpdated">
+      Last Updated: --
+    </p>
+
+    <p>
+      Refreshing every 30 seconds
+    </p>
+  </div>
+
+  <div id="legendBox">
+    <h3>Sensor Legend</h3>
+
+    <p>
+      <span class="legend-dot" style="background: lime;"></span>
+      Tank Sensors
+    </p>
+
+    <p>
+      <span class="legend-dot" style="background: orange;"></span>
+      Environmental Sensors
+    </p>
+
+    <p>
+      <span class="legend-dot" style="background: cyan;"></span>
+      Weather Sensors
+    </p>
+
+    <p>
+      <span class="legend-dot" style="background: magenta;"></span>
+      Indoor Sensors
+    </p>
   </div>
 
   <script>
+
     Cesium.Ion.defaultAccessToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJkYzM5Mjg0My1mZWZlLTRmNDMtODdkOS1hZTY2YWU0ZTc0ZGYiLCJpZCI6Mzk4NTkxLCJzdWIiOiJGUk9BQzQ4NiIsImlzcyI6Imh0dHBzOi8vaW9uLmNlc2l1bS5jb20iLCJhdWQiOiIyODBTdW5ueXNpZGVSb2FkIiwiaWF0IjoxNzc4MDQ4MjY0fQ.gTOJQiU2ytmtklEAEnOVe4OQ0_VGReM6RyAfMySSiuw";
 
     const viewer = new Cesium.Viewer("cesiumContainer", {
@@ -65,7 +137,11 @@
     });
 
     viewer.camera.flyTo({
-      destination: Cesium.Cartesian3.fromDegrees(143.7737, -38.6956, 1200),
+      destination: Cesium.Cartesian3.fromDegrees(
+        143.7737,
+        -38.6956,
+        1200
+      ),
       orientation: {
         heading: Cesium.Math.toRadians(0),
         pitch: Cesium.Math.toRadians(-55),
@@ -74,23 +150,58 @@
     });
 
     function getVal(props, name) {
-      return props && props[name] ? props[name].getValue() : null;
+      return props && props[name]
+        ? props[name].getValue()
+        : null;
     }
 
     function displayVal(value, unit = "") {
-      if (value === null || value === undefined || value === "" || Number.isNaN(value)) {
+
+      if (
+        value === null ||
+        value === undefined ||
+        value === "" ||
+        Number.isNaN(value)
+      ) {
         return "N/A";
       }
+
       return `${value}${unit}`;
     }
 
     function styleSensor(entity) {
+
       const p = entity.properties;
+
       const site = getVal(p, "site");
+      const type = getVal(p, "device_profile_name");
+
+      let pointColor = Cesium.Color.WHITE;
+
+      if (type && type.includes("DDS75")) {
+
+        pointColor = Cesium.Color.LIME;
+
+      }
+      else if (type && type.includes("SenseCAP")) {
+
+        pointColor = Cesium.Color.CYAN;
+
+      }
+      else if (type && type.includes("LSN50")) {
+
+        pointColor = Cesium.Color.ORANGE;
+
+      }
+      else if (type && type.includes("R711")) {
+
+        pointColor = Cesium.Color.MAGENTA;
+
+      }
 
       entity.point = new Cesium.PointGraphics({
         pixelSize: 14,
-        color: Cesium.Color.WHITE,
+        color: pointColor,
         outlineColor: Cesium.Color.BLACK,
         outlineWidth: 2,
         heightReference: Cesium.HeightReference.CLAMP_TO_GROUND
@@ -107,71 +218,117 @@
     }
 
     function buildPopup(entity) {
-      const p = entity.properties;
 
-      const site = getVal(p, "site");
-      const device = getVal(p, "device_name");
-      const type = getVal(p, "device_profile_name");
-      const time = getVal(p, "time");
+  const p = entity.properties;
 
-      const temp = getVal(p, "temperature_c") ?? getVal(p, "air_temperature") ?? getVal(p, "tank_temp_c");
-      const humidity = getVal(p, "humidity") ?? getVal(p, "air_humidity");
-      const pressure = getVal(p, "pressure");
-      const battery = getVal(p, "battery_v") ?? getVal(p, "tank_battery_v");
+  const site = getVal(p, "site");
+  const device = getVal(p, "device_name");
+  const type = getVal(p, "device_profile_name");
+  const time = getVal(p, "time");
 
-      const windSpeed = getVal(p, "wind_speed");
-      const windDirection = getVal(p, "wind_direction");
-      const windGust = getVal(p, "wind_gust");
+  const temp =
+    getVal(p, "temperature_c") ??
+    getVal(p, "air_temperature") ??
+    getVal(p, "tank_temp_c");
 
-      const rainGauge = getVal(p, "rain_gauge");
-      const rainAccumulation = getVal(p, "rain_accumulation");
+  const humidity =
+    getVal(p, "humidity") ??
+    getVal(p, "air_humidity");
 
-      const tankDistance = getVal(p, "tank_distance");
+  const pressure = getVal(p, "pressure");
 
-      const lat = getVal(p, "sensor_latitude");
-      const lon = getVal(p, "sensor_longitude");
+  const battery =
+    getVal(p, "battery_v") ??
+    getVal(p, "tank_battery_v");
 
-      entity.description = `
-        <h3>${displayVal(site)}</h3>
+  const windSpeed = getVal(p, "wind_speed");
+  const windDirection = getVal(p, "wind_direction");
+  const windGust = getVal(p, "wind_gust");
 
-        <p><b>Device:</b> ${displayVal(device)}</p>
-        <p><b>Type:</b> ${displayVal(type)}</p>
-        <p><b>Time:</b> ${displayVal(time)}</p>
+  const rainGauge = getVal(p, "rain_gauge");
+  const rainAccumulation = getVal(p, "rain_accumulation");
 
-        <hr>
+  const tankDistance = getVal(p, "tank_distance");
 
-        <p><b>Temperature:</b> ${displayVal(temp, " °C")}</p>
-        <p><b>Humidity:</b> ${displayVal(humidity, " %")}</p>
-        <p><b>Pressure:</b> ${displayVal(pressure, " hPa")}</p>
-        <p><b>Battery:</b> ${displayVal(battery, " V")}</p>
+  const rssi = getVal(p, "rssi");
+  const snr = getVal(p, "snr");
 
-        <hr>
+  const lat = getVal(p, "sensor_latitude");
+  const lon = getVal(p, "sensor_longitude");
 
-        <p><b>Wind speed:</b> ${displayVal(windSpeed, " m/s")}</p>
-        <p><b>Wind direction:</b> ${displayVal(windDirection, "°")}</p>
-        <p><b>Wind gust:</b> ${displayVal(windGust, " m/s")}</p>
-        <p><b>Rain gauge:</b> ${displayVal(rainGauge, " mm")}</p>
-        <p><b>Rain accumulation:</b> ${displayVal(rainAccumulation, " mm")}</p>
-        <p><b>Tank distance:</b> ${displayVal(tankDistance)}</p>
+  let sensorReadings = "";
 
-        <hr>
+  if (type && type.includes("DDS75")) {
+    sensorReadings = `
+      <p><b>Tank distance:</b> ${displayVal(tankDistance, " mm")}</p>
+      <p><b>Tank battery:</b> ${displayVal(battery, " V")}</p>
+    `;
+  }
 
-        <p><b>Latitude:</b> ${displayVal(lat)}</p>
-        <p><b>Longitude:</b> ${displayVal(lon)}</p>
-      `;
-    }
+  else if (type && type.includes("SenseCAP S2120")) {
+    sensorReadings = `
+      <p><b>Air temperature:</b> ${displayVal(temp, " °C")}</p>
+      <p><b>Air humidity:</b> ${displayVal(humidity, " %")}</p>
+      <p><b>Pressure:</b> ${displayVal(pressure, " hPa")}</p>
+      <p><b>Wind speed:</b> ${displayVal(windSpeed, " m/s")}</p>
+      <p><b>Wind direction:</b> ${displayVal(windDirection, "°")}</p>
+      <p><b>Wind gust:</b> ${displayVal(windGust, " m/s")}</p>
+      <p><b>Rain gauge:</b> ${displayVal(rainGauge, " mm")}</p>
+      <p><b>Rain accumulation:</b> ${displayVal(rainAccumulation, " mm")}</p>
+    `;
+  }
+
+  else if (type && type.includes("Barometric Pressure")) {
+    sensorReadings = `
+      <p><b>Pressure:</b> ${displayVal(pressure, " hPa")}</p>
+    `;
+  }
+
+  else {
+    sensorReadings = `
+      <p><b>Temperature:</b> ${displayVal(temp, " °C")}</p>
+      <p><b>Humidity:</b> ${displayVal(humidity, " %")}</p>
+      <p><b>Battery:</b> ${displayVal(battery, " V")}</p>
+    `;
+  }
+
+  entity.description = `
+    <h3>${displayVal(site)}</h3>
+
+    <p><b>Device:</b> ${displayVal(device)}</p>
+    <p><b>Type:</b> ${displayVal(type)}</p>
+    <p><b>Time:</b> ${displayVal(time)}</p>
+
+    <hr>
+
+    ${sensorReadings}
+
+    <hr>
+
+    <p><b>RSSI:</b> ${displayVal(rssi, " dBm")}</p>
+    <p><b>SNR:</b> ${displayVal(snr, " dB")}</p>
+
+    <hr>
+
+    <p><b>Latitude:</b> ${displayVal(lat)}</p>
+    <p><b>Longitude:</b> ${displayVal(lon)}</p>
+  `;
+}
 
     let sensorDataSource = null;
 
     function loadSensorData() {
+
       if (viewer.selectedEntity) {
         return;
       }
 
-      const geojsonUrl = "sensor_latest.geojson?cache=" + Date.now();
+      const geojsonUrl =
+        "sensor_latest.geojson?cache=" + Date.now();
 
       Cesium.GeoJsonDataSource.load(geojsonUrl, {
         clampToGround: true
+
       }).then(function(newDataSource) {
 
         if (sensorDataSource) {
@@ -179,22 +336,39 @@
         }
 
         sensorDataSource = newDataSource;
+
         viewer.dataSources.add(sensorDataSource);
 
-        const entities = sensorDataSource.entities.values;
+        const entities =
+          sensorDataSource.entities.values;
+
+        document.getElementById("sensorCount").innerText =
+          "Sensors Online: " + entities.length;
+
+        document.getElementById("lastUpdated").innerText =
+          "Last Updated: " + new Date().toLocaleString();
 
         for (let i = 0; i < entities.length; i++) {
+
           styleSensor(entities[i]);
           buildPopup(entities[i]);
+
         }
 
       }).catch(function(error) {
-        console.error("Error loading GeoJSON:", error);
+
+        console.error(
+          "Error loading GeoJSON:",
+          error
+        );
+
       });
     }
 
     loadSensorData();
+
     setInterval(loadSensorData, 30000);
+
   </script>
 </body>
 </html>

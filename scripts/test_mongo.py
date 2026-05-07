@@ -7,7 +7,7 @@ URI = os.getenv("MONGODB_URI")
 DB_NAME = "iot"
 COLLECTION_NAME = "sensordata"
 
-client = MongoClient(uri, server_api=ServerApi('1'))
+client = MongoClient(URI, server_api=ServerApi('1'))
 
 try:
     client.admin.command('ping')

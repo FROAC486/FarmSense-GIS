@@ -190,7 +190,7 @@ def extract_environmental_fields(obj, device_profile_name):
 
 
 def extract_tank_fields(obj, device_profile_name):
-    if device_profile_name != "DDS75":
+    if not device_profile_name or "DDS75" not in device_profile_name:
         return {
             "tank_distance": None,
             "tank_battery_v": None,
