@@ -1,8 +1,11 @@
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 import pandas as pd
+import os
 
-uri = "mongodb+srv://oliver:uKQbTX8ebb1zGVFy@cluster0.cvmjitc.mongodb.net/?appName=Cluster0"
+URI = os.getenv("MONGODB_URI")
+DB_NAME = "iot"
+COLLECTION_NAME = "sensordata"
 
 client = MongoClient(uri, server_api=ServerApi('1'))
 
