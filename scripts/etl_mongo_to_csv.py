@@ -3,11 +3,12 @@ from pymongo.server_api import ServerApi
 import psycopg2
 import pandas as pd
 import json
+import os
 
 # =========================
 # MONGODB CONFIG
-# =========================
-URI = "mongodb+srv://oliver:uKQbTX8ebb1zGVFy@cluster0.cvmjitc.mongodb.net/?appName=Cluster0"
+# ========================
+URI = os.getenv("MONGODB_URI")
 DB_NAME = "iot"
 COLLECTION_NAME = "sensordata"
 
