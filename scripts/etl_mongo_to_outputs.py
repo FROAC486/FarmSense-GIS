@@ -17,8 +17,8 @@ COLLECTION_NAME = "sensordata"
 # POSTGIS CONFIG
 # =========================
 PG_HOST = "localhost"
-PG_PORT = "5433"
-PG_DBNAME = "farm_project"
+PG_PORT = "5432"
+PG_DBNAME = "farmsense"
 PG_USER = "postgres"
 PG_PASSWORD = "admin"
 PG_SSLMODE = "prefer"
