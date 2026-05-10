@@ -1,6 +1,6 @@
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
-import psycopg2
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import json
 import os
@@ -16,23 +16,18 @@ COLLECTION_NAME = os.getenv("MONGODB_COLLECTION", "sensordata")
 
 
 # =========================
-# POSTGIS CONFIG
-# =========================
-PG_HOST = os.getenv("PG_HOST", "localhost")
-PG_PORT = os.getenv("PG_PORT", "5432")
-PG_DBNAME = os.getenv("PG_DBNAME", "farmsense")
-PG_USER = os.getenv("PG_USER", "postgres")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "admin")
-PG_SSLMODE = os.getenv("PG_SSLMODE", "prefer")
-
-
-# =========================
 # OUTPUT CONFIG
 # =========================
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-OUTPUT_GEOJSON = BASE_DIR / "web" / "sensor_latest.geojson"
-OUTPUT_CSV = BASE_DIR / "data" / "sensor_latest.csv"
+OUTPUT_JSON = BASE_DIR / "web" / "sensor_history_24h.json"
+OUTPUT_CSV = BASE_DIR / "data" / "sensor_history_24h.csv"
+
+
+# =========================
+# TIME CONFIG
+# =========================
+HOURS_BACK = 24
 
 
 # =========================
@@ -56,28 +51,6 @@ def parse_int(value):
         return None
 
 
-def safe_json_dumps(value):
-    try:
-        return json.dumps(value, ensure_ascii=False)
-    except Exception:
-        return None
-
-
-def build_geojson_point(lon, lat, alt=None):
-    if lon is None or lat is None:
-        return None
-
-    coords = [lon, lat]
-
-    if alt is not None:
-        coords.append(alt)
-
-    return json.dumps({
-        "type": "Point",
-        "coordinates": coords
-    })
-
-
 def valid_humidity(value):
     h = parse_float(value)
 
@@ -88,6 +61,26 @@ def valid_humidity(value):
         return h
 
     return None
+
+
+def safe_json_dumps(value):
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return None
+
+
+def clean_for_json(value):
+    if pd.isna(value):
+        return None
+
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    return value
 
 
 # =========================
@@ -104,7 +97,6 @@ def extract_tags_location(device_info):
 
     geojson_raw = tags.get("geojson")
 
-    geojson_clean = None
     lat = None
     lon = None
     alt = None
@@ -121,8 +113,6 @@ def extract_tags_location(device_info):
                 if len(coords) >= 3:
                     alt = parse_float(coords[2])
 
-                geojson_clean = json.dumps(geo)
-
         except Exception:
             pass
 
@@ -131,14 +121,12 @@ def extract_tags_location(device_info):
             lat = tag_lat
             lon = tag_lon
             alt = tag_alt
-            geojson_clean = build_geojson_point(lon, lat, alt)
 
     return {
         "site": site,
         "sensor_latitude": lat,
         "sensor_longitude": lon,
         "sensor_altitude": alt,
-        "sensor_geojson": geojson_clean,
         "raw_tags_json": safe_json_dumps(tags)
     }
 
@@ -147,9 +135,6 @@ def extract_gateway_info(doc):
     rx_info = doc.get("rxInfo", [])
 
     gateway_id = None
-    gateway_lat = None
-    gateway_lon = None
-    gateway_alt = None
     rssi = None
     snr = None
 
@@ -157,21 +142,11 @@ def extract_gateway_info(doc):
         first_rx = rx_info[0]
 
         gateway_id = first_rx.get("gatewayId")
-        rssi = first_rx.get("rssi")
-        snr = first_rx.get("snr")
-
-        loc = first_rx.get("location", {}) or {}
-
-        gateway_lat = parse_float(loc.get("latitude"))
-        gateway_lon = parse_float(loc.get("longitude"))
-        gateway_alt = parse_float(loc.get("altitude"))
+        rssi = parse_float(first_rx.get("rssi"))
+        snr = parse_float(first_rx.get("snr"))
 
     return {
         "gateway_id": gateway_id,
-        "gateway_latitude": gateway_lat,
-        "gateway_longitude": gateway_lon,
-        "gateway_altitude": gateway_alt,
-        "gateway_geojson": build_geojson_point(gateway_lon, gateway_lat, gateway_alt),
         "rssi": rssi,
         "snr": snr
     }
@@ -373,264 +348,62 @@ def flatten_doc(doc):
 
 
 # =========================
-# MONGODB LATEST PER DEVICE
+# MONGODB QUERY
 # =========================
-def fetch_latest_per_device(collection):
-    device_names = collection.distinct("deviceInfo.deviceName")
-    latest_docs = []
+def fetch_last_24_hours(collection):
+    now_utc = datetime.now(timezone.utc)
+    start_time = now_utc - timedelta(hours=HOURS_BACK)
 
-    print(f"Found {len(device_names)} devices")
+    print(f"Fetching records from the last {HOURS_BACK} hours")
+    print(f"Start time UTC: {start_time.isoformat()}")
+    print(f"End time UTC:   {now_utc.isoformat()}")
 
-    for device_name in device_names:
-        if not device_name:
-            continue
+    query = {
+        "time": {
+            "$gte": start_time.isoformat()
+        }
+    }
 
-        doc = collection.find_one(
-            {"deviceInfo.deviceName": device_name},
-            sort=[
-                ("time", -1),
-                ("_id", -1)
-            ]
-        )
+    docs = list(
+        collection.find(query).sort([
+            ("deviceInfo.deviceName", 1),
+            ("time", 1),
+            ("_id", 1)
+        ])
+    )
 
-        if doc:
-            latest_docs.append(doc)
+    print(f"Records found: {len(docs)}")
 
-    return latest_docs
+    return docs
 
 
 # =========================
 # OUTPUT WRITERS
 # =========================
-def write_snapshot_csv(df):
+def write_history_csv(df):
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(OUTPUT_CSV, index=False)
-    print(f"Wrote latest snapshot CSV to {OUTPUT_CSV}")
+    print(f"Wrote 24-hour history CSV to {OUTPUT_CSV}")
 
 
-def clean_value_for_geojson(value):
-    if pd.isna(value):
-        return None
+def write_history_json(df):
+    OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
 
-    if isinstance(value, pd.Timestamp):
-        return value.isoformat()
-
-    return value
-
-
-def write_snapshot_geojson(df):
-    OUTPUT_GEOJSON.parent.mkdir(parents=True, exist_ok=True)
-
-    features = []
+    records = []
 
     for _, row in df.iterrows():
-        lat = row.get("sensor_latitude")
-        lon = row.get("sensor_longitude")
-
-        if pd.isna(lat) or pd.isna(lon):
-            print(f"Skipping GeoJSON feature for {row.get('device_name')} - missing coordinates")
-            continue
-
-        properties = {}
+        item = {}
 
         for col in df.columns:
-            value = row[col]
-            properties[col] = clean_value_for_geojson(value)
+            item[col] = clean_for_json(row[col])
 
-        feature = {
-            "type": "Feature",
-            "geometry": {
-                "type": "Point",
-                "coordinates": [float(lon), float(lat)]
-            },
-            "properties": properties
-        }
+        records.append(item)
 
-        features.append(feature)
+    with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2, ensure_ascii=False)
 
-    geojson = {
-        "type": "FeatureCollection",
-        "features": features
-    }
-
-    with open(OUTPUT_GEOJSON, "w", encoding="utf-8") as f:
-        json.dump(geojson, f, indent=2, ensure_ascii=False)
-
-    print(f"Wrote latest GeoJSON to {OUTPUT_GEOJSON}")
-    print(f"GeoJSON features written: {len(features)}")
-
-
-# =========================
-# POSTGIS LOADER
-# =========================
-def create_postgis_table_if_missing(pg_cur):
-    create_query = """
-    CREATE EXTENSION IF NOT EXISTS postgis;
-
-    CREATE TABLE IF NOT EXISTS sensor_latest (
-        device_name TEXT PRIMARY KEY,
-        mongo_id TEXT,
-        time TIMESTAMPTZ,
-        site TEXT,
-        device_profile TEXT,
-        temperature_c DOUBLE PRECISION,
-        humidity DOUBLE PRECISION,
-        pressure DOUBLE PRECISION,
-        battery_v DOUBLE PRECISION,
-        tank_air_gap_mm DOUBLE PRECISION,
-        tank_air_gap_m DOUBLE PRECISION,
-        tank_distance DOUBLE PRECISION,
-        tank_battery_v DOUBLE PRECISION,
-        tank_temp_c DOUBLE PRECISION,
-        air_temperature DOUBLE PRECISION,
-        air_humidity DOUBLE PRECISION,
-        wind_speed DOUBLE PRECISION,
-        wind_direction DOUBLE PRECISION,
-        wind_gust DOUBLE PRECISION,
-        rain_gauge DOUBLE PRECISION,
-        rain_accumulation DOUBLE PRECISION,
-        rssi DOUBLE PRECISION,
-        snr DOUBLE PRECISION,
-        geom geometry(Point, 4326)
-    );
-    """
-
-    pg_cur.execute(create_query)
-
-
-def insert_into_postgis_latest(df):
-    if df.empty:
-        print("No rows to insert into PostGIS.")
-        return
-
-    pg_conn = psycopg2.connect(
-        host=PG_HOST,
-        port=PG_PORT,
-        dbname=PG_DBNAME,
-        user=PG_USER,
-        password=PG_PASSWORD,
-        sslmode=PG_SSLMODE
-    )
-
-    pg_cur = pg_conn.cursor()
-
-    create_postgis_table_if_missing(pg_cur)
-
-    upsert_query = """
-    INSERT INTO sensor_latest (
-        device_name,
-        mongo_id,
-        time,
-        site,
-        device_profile,
-        temperature_c,
-        humidity,
-        pressure,
-        battery_v,
-        tank_air_gap_mm,
-        tank_air_gap_m,
-        tank_distance,
-        tank_battery_v,
-        tank_temp_c,
-        air_temperature,
-        air_humidity,
-        wind_speed,
-        wind_direction,
-        wind_gust,
-        rain_gauge,
-        rain_accumulation,
-        rssi,
-        snr,
-        geom
-    )
-    VALUES (
-        %s, %s, %s, %s, %s,
-        %s, %s, %s, %s,
-        %s, %s, %s, %s, %s,
-        %s, %s, %s, %s, %s, %s, %s,
-        %s, %s,
-        ST_SetSRID(ST_MakePoint(%s, %s), 4326)
-    )
-    ON CONFLICT (device_name)
-    DO UPDATE SET
-        mongo_id = EXCLUDED.mongo_id,
-        time = EXCLUDED.time,
-        site = EXCLUDED.site,
-        device_profile = EXCLUDED.device_profile,
-        temperature_c = EXCLUDED.temperature_c,
-        humidity = EXCLUDED.humidity,
-        pressure = EXCLUDED.pressure,
-        battery_v = EXCLUDED.battery_v,
-        tank_air_gap_mm = EXCLUDED.tank_air_gap_mm,
-        tank_air_gap_m = EXCLUDED.tank_air_gap_m,
-        tank_distance = EXCLUDED.tank_distance,
-        tank_battery_v = EXCLUDED.tank_battery_v,
-        tank_temp_c = EXCLUDED.tank_temp_c,
-        air_temperature = EXCLUDED.air_temperature,
-        air_humidity = EXCLUDED.air_humidity,
-        wind_speed = EXCLUDED.wind_speed,
-        wind_direction = EXCLUDED.wind_direction,
-        wind_gust = EXCLUDED.wind_gust,
-        rain_gauge = EXCLUDED.rain_gauge,
-        rain_accumulation = EXCLUDED.rain_accumulation,
-        rssi = EXCLUDED.rssi,
-        snr = EXCLUDED.snr,
-        geom = EXCLUDED.geom;
-    """
-
-    upserted_count = 0
-
-    for _, row in df.iterrows():
-        lon = row.get("sensor_longitude")
-        lat = row.get("sensor_latitude")
-
-        if lon is None or lat is None or pd.isna(lon) or pd.isna(lat):
-            print(f"Skipping PostGIS insert for {row.get('device_name')} - no sensor coordinates")
-            continue
-
-        pg_cur.execute(
-            upsert_query,
-            (
-                row.get("device_name"),
-                row.get("mongo_id"),
-                row.get("time"),
-                row.get("site"),
-                row.get("device_profile_name"),
-
-                row.get("temperature_c"),
-                row.get("humidity"),
-                row.get("pressure"),
-                row.get("battery_v"),
-
-                row.get("tank_air_gap_mm"),
-                row.get("tank_air_gap_m"),
-                row.get("tank_distance"),
-                row.get("tank_battery_v"),
-                row.get("tank_temp_c"),
-
-                row.get("air_temperature"),
-                row.get("air_humidity"),
-                row.get("wind_speed"),
-                row.get("wind_direction"),
-                row.get("wind_gust"),
-                row.get("rain_gauge"),
-                row.get("rain_accumulation"),
-
-                row.get("rssi"),
-                row.get("snr"),
-
-                lon,
-                lat
-            )
-        )
-
-        upserted_count += 1
-
-    pg_conn.commit()
-    pg_cur.close()
-    pg_conn.close()
-
-    print(f"Upserted {upserted_count} rows into PostGIS table sensor_latest.")
+    print(f"Wrote 24-hour history JSON to {OUTPUT_JSON}")
+    print(f"JSON records written: {len(records)}")
 
 
 # =========================
@@ -644,25 +417,29 @@ def print_summary(df):
     print("\nDevice profile counts:")
     print(df["device_profile_name"].value_counts(dropna=False).to_string())
 
-    print("\nLatest devices snapshot:")
+    print("\nRecords per device:")
+    print(df["device_name"].value_counts(dropna=False).to_string())
+
+    print("\nPreview of graphable fields:")
 
     cols = [
         "device_name",
         "device_profile_name",
         "site",
         "time",
-        "sensor_latitude",
-        "sensor_longitude",
         "temperature_c",
         "humidity",
         "air_temperature",
         "air_humidity",
         "pressure",
         "wind_speed",
+        "wind_gust",
         "rain_gauge",
+        "rain_accumulation",
         "tank_air_gap_mm",
-        "tank_air_gap_m",
+        "tank_distance",
         "tank_temp_c",
+        "battery_v",
         "tank_battery_v",
         "rssi",
         "snr"
@@ -672,8 +449,7 @@ def print_summary(df):
 
     print(
         df[existing_cols]
-        .drop_duplicates()
-        .sort_values(["device_profile_name", "device_name"], na_position="last")
+        .head(20)
         .to_string(index=False)
     )
 
@@ -696,29 +472,29 @@ def run_once():
     db = client[DB_NAME]
     collection = db[COLLECTION_NAME]
 
-    docs = fetch_latest_per_device(collection)
+    docs = fetch_last_24_hours(collection)
 
     if not docs:
-        print("No latest records found.")
+        print("No records found for the last 24 hours.")
+
+        empty_df = pd.DataFrame()
+        write_history_csv(empty_df)
+
+        OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
+        with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
+            json.dump([], f, indent=2)
+
+        print(f"Wrote empty history JSON to {OUTPUT_JSON}")
         return
 
     rows = [flatten_doc(doc) for doc in docs]
     df = pd.DataFrame(rows)
 
-    df = df.drop_duplicates(subset=["device_name"])
-
     if not df.empty and "time" in df.columns:
-        df = df.sort_values("time", ascending=False)
+        df = df.sort_values(["device_name", "time"], ascending=True)
 
-    write_snapshot_csv(df)
-    write_snapshot_geojson(df)
-
-    try:
-        insert_into_postgis_latest(df)
-    except Exception as e:
-        print("PostGIS upload skipped/failed:")
-        print(e)
-
+    write_history_csv(df)
+    write_history_json(df)
     print_summary(df)
 
 
@@ -726,4 +502,4 @@ if __name__ == "__main__":
     try:
         run_once()
     except Exception as e:
-        print("ETL failed:", e)
+        print("ETL stats failed:", e)
