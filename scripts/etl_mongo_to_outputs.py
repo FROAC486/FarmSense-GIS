@@ -30,13 +30,12 @@ PG_SSLMODE = os.getenv("PG_SSLMODE", "prefer")
 # OUTPUT CONFIG
 # =========================
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 OUTPUT_GEOJSON = BASE_DIR / "web" / "sensor_latest.geojson"
 OUTPUT_CSV = BASE_DIR / "data" / "sensor_latest.csv"
 
 
 # =========================
-# BASIC PARSING HELPERS
+# PARSING HELPERS
 # =========================
 def parse_float(value):
     try:
@@ -61,6 +60,14 @@ def safe_json_dumps(value):
         return json.dumps(value, ensure_ascii=False)
     except Exception:
         return None
+
+
+def first_valid_float(*values):
+    for value in values:
+        parsed = parse_float(value)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def build_geojson_point(lon, lat, alt=None):
@@ -223,8 +230,24 @@ def extract_environmental_fields(obj, device_profile_name):
 # =========================
 # TANK SENSOR FIELDS
 # =========================
-def extract_tank_fields(obj, device_profile_name):
-    is_tank = device_profile_name and "DDS75" in device_profile_name
+def extract_tank_fields(obj, device_profile_name, site=None, device_name=None):
+    has_distance = any(
+        key in obj
+        for key in [
+            "Distance",
+            "distance",
+            "Distance_mm",
+            "distance_mm",
+            "distance_mm_value"
+        ]
+    )
+
+    is_tank = (
+        has_distance
+        or (device_profile_name and "DDS75" in str(device_profile_name))
+        or (site and "tank" in str(site).lower())
+        or (device_name and "tank" in str(device_name).lower())
+    )
 
     empty_tank_fields = {
         "tank_air_gap_mm": None,
@@ -233,12 +256,15 @@ def extract_tank_fields(obj, device_profile_name):
         "tank_battery_v": None,
         "tank_temp_c": None,
         "interrupt_flag": None,
-        "sensor_flag": None
+        "sensor_flag": None,
+        "raw_distance": None,
+        "raw_tank_object_json": None
     }
 
     if not is_tank:
         return empty_tank_fields
 
+    # FIXED VERSION
     distance = parse_float(obj.get("Distance"))
 
     if distance is None:
@@ -250,14 +276,19 @@ def extract_tank_fields(obj, device_profile_name):
     if distance is None:
         distance = parse_float(obj.get("distance_mm"))
 
+    if distance is None:
+        distance = parse_float(obj.get("distance_mm_value"))
+
     return {
         "tank_air_gap_mm": distance,
         "tank_air_gap_m": distance / 1000 if distance is not None else None,
         "tank_distance": distance,
-        "tank_battery_v": parse_float(obj.get("Bat")),
-        "tank_temp_c": parse_float(obj.get("TempC_DS18B20")),
+        "tank_battery_v": first_valid_float(obj.get("Bat"), obj.get("BatV"), obj.get("battery")),
+        "tank_temp_c": first_valid_float(obj.get("TempC_DS18B20"), obj.get("TempC1")),
         "interrupt_flag": parse_int(obj.get("Interrupt_flag")),
-        "sensor_flag": parse_int(obj.get("Sensor_flag"))
+        "sensor_flag": parse_int(obj.get("Sensor_flag")),
+        "raw_distance": obj.get("Distance"),
+        "raw_tank_object_json": safe_json_dumps(obj)
     }
 
 
@@ -334,8 +365,11 @@ def extract_sensecap_fields(obj, device_profile_name):
 def flatten_doc(doc):
     device_info = doc.get("deviceInfo", {}) or {}
     obj = doc.get("object", {}) or {}
+    tags = device_info.get("tags", {}) or {}
 
     device_profile_name = device_info.get("deviceProfileName")
+    device_name = device_info.get("deviceName")
+    site = tags.get("site")
 
     row = {
         "mongo_id": str(doc.get("_id")),
@@ -348,7 +382,7 @@ def flatten_doc(doc):
         "tenant_name": device_info.get("tenantName"),
         "application_name": device_info.get("applicationName"),
         "device_profile_name": device_profile_name,
-        "device_name": device_info.get("deviceName"),
+        "device_name": device_name,
         "dev_eui": device_info.get("devEui"),
         "device_class": device_info.get("deviceClassEnabled"),
 
@@ -366,7 +400,7 @@ def flatten_doc(doc):
     row.update(extract_tags_location(device_info))
     row.update(extract_gateway_info(doc))
     row.update(extract_environmental_fields(obj, device_profile_name))
-    row.update(extract_tank_fields(obj, device_profile_name))
+    row.update(extract_tank_fields(obj, device_profile_name, site, device_name))
     row.update(extract_sensecap_fields(obj, device_profile_name))
 
     return row
@@ -463,10 +497,10 @@ def write_snapshot_geojson(df):
 # =========================
 # POSTGIS LOADER
 # =========================
-def create_postgis_table_if_missing(pg_cur):
-    create_query = """
-    CREATE EXTENSION IF NOT EXISTS postgis;
+def create_or_update_postgis_table(pg_cur):
+    pg_cur.execute("CREATE EXTENSION IF NOT EXISTS postgis;")
 
+    pg_cur.execute("""
     CREATE TABLE IF NOT EXISTS sensor_latest (
         device_name TEXT PRIMARY KEY,
         mongo_id TEXT,
@@ -477,25 +511,29 @@ def create_postgis_table_if_missing(pg_cur):
         humidity DOUBLE PRECISION,
         pressure DOUBLE PRECISION,
         battery_v DOUBLE PRECISION,
-        tank_air_gap_mm DOUBLE PRECISION,
-        tank_air_gap_m DOUBLE PRECISION,
-        tank_distance DOUBLE PRECISION,
-        tank_battery_v DOUBLE PRECISION,
-        tank_temp_c DOUBLE PRECISION,
-        air_temperature DOUBLE PRECISION,
-        air_humidity DOUBLE PRECISION,
-        wind_speed DOUBLE PRECISION,
-        wind_direction DOUBLE PRECISION,
-        wind_gust DOUBLE PRECISION,
-        rain_gauge DOUBLE PRECISION,
-        rain_accumulation DOUBLE PRECISION,
-        rssi DOUBLE PRECISION,
-        snr DOUBLE PRECISION,
         geom geometry(Point, 4326)
     );
+    """)
+
+    alter_query = """
+    ALTER TABLE sensor_latest
+    ADD COLUMN IF NOT EXISTS tank_air_gap_mm DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS tank_air_gap_m DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS tank_distance DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS tank_battery_v DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS tank_temp_c DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS air_temperature DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS air_humidity DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS wind_speed DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS wind_direction DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS wind_gust DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS rain_gauge DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS rain_accumulation DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS rssi DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS snr DOUBLE PRECISION;
     """
 
-    pg_cur.execute(create_query)
+    pg_cur.execute(alter_query)
 
 
 def insert_into_postgis_latest(df):
@@ -514,7 +552,7 @@ def insert_into_postgis_latest(df):
 
     pg_cur = pg_conn.cursor()
 
-    create_postgis_table_if_missing(pg_cur)
+    create_or_update_postgis_table(pg_cur)
 
     upsert_query = """
     INSERT INTO sensor_latest (
@@ -644,6 +682,31 @@ def print_summary(df):
     print("\nDevice profile counts:")
     print(df["device_profile_name"].value_counts(dropna=False).to_string())
 
+    print("\nTank debug check:")
+    tank_cols = [
+        "device_name",
+        "device_profile_name",
+        "site",
+        "time",
+        "tank_air_gap_mm",
+        "tank_air_gap_m",
+        "tank_temp_c",
+        "tank_battery_v",
+        "raw_distance"
+    ]
+
+    existing_tank_cols = [col for col in tank_cols if col in df.columns]
+
+    print(
+        df[existing_tank_cols]
+        .loc[
+            df["site"].astype(str).str.contains("tank", case=False, na=False)
+            | df["device_profile_name"].astype(str).str.contains("DDS75", case=False, na=False)
+            | df["tank_air_gap_mm"].notna()
+        ]
+        .to_string(index=False)
+    )
+
     print("\nLatest devices snapshot:")
 
     cols = [
@@ -685,7 +748,7 @@ def run_once():
     if not URI:
         raise ValueError(
             "MONGODB_URI environment variable is not set. "
-            "Set it in PowerShell before running the script."
+            "Set it before running the script."
         )
 
     client = MongoClient(URI, server_api=ServerApi("1"))

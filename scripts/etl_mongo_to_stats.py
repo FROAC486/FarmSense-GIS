@@ -20,14 +20,21 @@ COLLECTION_NAME = os.getenv("MONGODB_COLLECTION", "sensordata")
 # =========================
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-OUTPUT_JSON = BASE_DIR / "web" / "sensor_history_24h.json"
-OUTPUT_CSV = BASE_DIR / "data" / "sensor_history_24h.csv"
+WEB_DIR = BASE_DIR / "web"
+DATA_DIR = BASE_DIR / "data"
 
 
 # =========================
-# TIME CONFIG
+# TIME PERIOD CONFIG
 # =========================
-HOURS_BACK = 24
+PERIODS = {
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+    "6m": timedelta(days=182),
+    "12m": timedelta(days=365),
+    "all": None
+}
 
 
 # =========================
@@ -79,6 +86,12 @@ def clean_for_json(value):
 
     if isinstance(value, datetime):
         return value.isoformat()
+
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
 
     return value
 
@@ -350,44 +363,183 @@ def flatten_doc(doc):
 # =========================
 # MONGODB QUERY
 # =========================
-def fetch_last_24_hours(collection):
+def build_time_query(period_delta):
+    if period_delta is None:
+        return {}
+
     now_utc = datetime.now(timezone.utc)
-    start_time = now_utc - timedelta(hours=HOURS_BACK)
+    start_time = now_utc - period_delta
 
-    print(f"Fetching records from the last {HOURS_BACK} hours")
-    print(f"Start time UTC: {start_time.isoformat()}")
-    print(f"End time UTC:   {now_utc.isoformat()}")
-
-    query = {
+    return {
         "time": {
             "$gte": start_time.isoformat()
         }
     }
 
-    docs = list(
-        collection.find(query).sort([
-            ("deviceInfo.deviceName", 1),
-            ("time", 1),
-            ("_id", 1)
-        ])
-    )
 
-    print(f"Records found: {len(docs)}")
+def fetch_period_records(collection, period_name, period_delta):
+    print(f"\nFetching records for: {period_name}")
+
+    if period_delta is None:
+        print("Time filter: whole record")
+    else:
+        now_utc = datetime.now(timezone.utc)
+        start_time = now_utc - period_delta
+
+        print(f"Start time UTC: {start_time.isoformat()}")
+        print(f"End time UTC:   {now_utc.isoformat()}")
+
+    query = build_time_query(period_delta)
+
+    # Important:
+    # Do NOT sort in MongoDB for long date ranges.
+    # MongoDB can hit its 32MB memory sort limit.
+    # We fetch first, then sort later in Pandas.
+    docs = list(collection.find(query))
+
+    print(f"Records found for {period_name}: {len(docs)}")
 
     return docs
+
+# =========================
+# LONG PERIOD DOWNSAMPLING
+# =========================
+def downsample_long_record(df):
+    if df.empty:
+        return df
+
+    if "time" not in df.columns:
+        return df
+
+    if len(df) <= 5000:
+        print("Long-period dataset is small enough. Keeping raw records.")
+        return df
+
+    print("Long-period dataset is large. Downsampling to hourly averages per sensor...")
+
+    df = df.copy()
+
+    df["parsed_time"] = pd.to_datetime(df["time"], errors="coerce", utc=True)
+    df = df.dropna(subset=["parsed_time"])
+
+    if df.empty:
+        return df.drop(columns=["parsed_time"], errors="ignore")
+
+    df["hour"] = df["parsed_time"].dt.floor("h")
+
+    graphable_columns = [
+        "temperature_c",
+        "humidity",
+        "air_temperature",
+        "air_humidity",
+        "pressure",
+        "wind_speed",
+        "wind_direction",
+        "wind_gust",
+        "rain_gauge",
+        "rain_accumulation",
+        "tank_air_gap_mm",
+        "tank_distance",
+        "tank_temp_c",
+        "battery_v",
+        "tank_battery_v",
+        "rssi",
+        "snr"
+    ]
+
+    existing_graphable_columns = [
+        col for col in graphable_columns
+        if col in df.columns
+    ]
+
+    metadata_columns = [
+        "mongo_id",
+        "time",
+        "iso",
+        "ts",
+        "topic",
+        "deduplication_id",
+        "tenant_name",
+        "application_name",
+        "device_profile_name",
+        "dev_eui",
+        "device_class",
+        "dev_addr",
+        "f_cnt",
+        "f_port",
+        "confirmed",
+        "adr",
+        "dr",
+        "region_config_id",
+        "site",
+        "sensor_latitude",
+        "sensor_longitude",
+        "sensor_altitude",
+        "raw_tags_json",
+        "gateway_id",
+        "door_status",
+        "digital_status",
+        "work_mode",
+        "raw_object_json",
+        "sensecap_payload_valid",
+        "sensecap_payload_hex",
+        "sensecap_err"
+    ]
+
+    existing_metadata_columns = [
+        col for col in metadata_columns
+        if col in df.columns
+    ]
+
+    for col in existing_graphable_columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    grouped_numeric = (
+        df
+        .groupby(["device_name", "hour"], dropna=False)[existing_graphable_columns]
+        .mean()
+        .reset_index()
+    )
+
+    grouped_meta = (
+        df
+        .sort_values("parsed_time")
+        .groupby(["device_name", "hour"], dropna=False)[existing_metadata_columns]
+        .last()
+        .reset_index()
+    )
+
+    result = pd.merge(
+        grouped_meta,
+        grouped_numeric,
+        on=["device_name", "hour"],
+        how="left"
+    )
+
+    result["time"] = result["hour"].dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    result = result.drop(columns=["hour"], errors="ignore")
+
+    return result
 
 
 # =========================
 # OUTPUT WRITERS
 # =========================
-def write_history_csv(df):
-    OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(OUTPUT_CSV, index=False)
-    print(f"Wrote 24-hour history CSV to {OUTPUT_CSV}")
+def write_history_csv(df, period_name):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    output_csv = DATA_DIR / f"sensor_history_{period_name}.csv"
+
+    df.to_csv(output_csv, index=False)
+
+    print(f"Wrote history CSV to {output_csv}")
 
 
-def write_history_json(df):
-    OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
+def write_history_json(df, period_name):
+    WEB_DIR.mkdir(parents=True, exist_ok=True)
+
+    output_json = WEB_DIR / f"sensor_history_{period_name}.json"
 
     records = []
 
@@ -399,26 +551,46 @@ def write_history_json(df):
 
         records.append(item)
 
-    with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
+    with open(output_json, "w", encoding="utf-8") as f:
         json.dump(records, f, indent=2, ensure_ascii=False)
 
-    print(f"Wrote 24-hour history JSON to {OUTPUT_JSON}")
+    print(f"Wrote history JSON to {output_json}")
     print(f"JSON records written: {len(records)}")
+
+
+def write_empty_outputs(period_name):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    WEB_DIR.mkdir(parents=True, exist_ok=True)
+
+    output_csv = DATA_DIR / f"sensor_history_{period_name}.csv"
+    output_json = WEB_DIR / f"sensor_history_{period_name}.json"
+
+    pd.DataFrame().to_csv(output_csv, index=False)
+
+    with open(output_json, "w", encoding="utf-8") as f:
+        json.dump([], f, indent=2)
+
+    print(f"Wrote empty CSV to {output_csv}")
+    print(f"Wrote empty JSON to {output_json}")
 
 
 # =========================
 # CONSOLE SUMMARY
 # =========================
-def print_summary(df):
+def print_summary(df, period_name):
     if df.empty:
-        print("No data available for summary.")
+        print(f"No data available for summary: {period_name}")
         return
 
-    print("\nDevice profile counts:")
-    print(df["device_profile_name"].value_counts(dropna=False).to_string())
+    print(f"\nSummary for {period_name}")
 
-    print("\nRecords per device:")
-    print(df["device_name"].value_counts(dropna=False).to_string())
+    if "device_profile_name" in df.columns:
+        print("\nDevice profile counts:")
+        print(df["device_profile_name"].value_counts(dropna=False).to_string())
+
+    if "device_name" in df.columns:
+        print("\nRecords per device:")
+        print(df["device_name"].value_counts(dropna=False).to_string())
 
     print("\nPreview of graphable fields:")
 
@@ -455,13 +627,38 @@ def print_summary(df):
 
 
 # =========================
+# PERIOD PROCESSOR
+# =========================
+def process_period(collection, period_name, period_delta):
+    docs = fetch_period_records(collection, period_name, period_delta)
+
+    if not docs:
+        print(f"No records found for {period_name}.")
+        write_empty_outputs(period_name)
+        return
+
+    rows = [flatten_doc(doc) for doc in docs]
+    df = pd.DataFrame(rows)
+
+    if not df.empty and "time" in df.columns:
+        df = df.sort_values(["device_name", "time"], ascending=True)
+
+    if period_name in ["6m", "12m", "all"]:
+        df = downsample_long_record(df)
+
+    write_history_csv(df, period_name)
+    write_history_json(df, period_name)
+    print_summary(df, period_name)
+
+
+# =========================
 # MAIN RUNNER
 # =========================
 def run_once():
     if not URI:
         raise ValueError(
             "MONGODB_URI environment variable is not set. "
-            "Set it in PowerShell before running the script."
+            "Set it before running this script."
         )
 
     client = MongoClient(URI, server_api=ServerApi("1"))
@@ -472,30 +669,10 @@ def run_once():
     db = client[DB_NAME]
     collection = db[COLLECTION_NAME]
 
-    docs = fetch_last_24_hours(collection)
+    for period_name, period_delta in PERIODS.items():
+        process_period(collection, period_name, period_delta)
 
-    if not docs:
-        print("No records found for the last 24 hours.")
-
-        empty_df = pd.DataFrame()
-        write_history_csv(empty_df)
-
-        OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
-        with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
-            json.dump([], f, indent=2)
-
-        print(f"Wrote empty history JSON to {OUTPUT_JSON}")
-        return
-
-    rows = [flatten_doc(doc) for doc in docs]
-    df = pd.DataFrame(rows)
-
-    if not df.empty and "time" in df.columns:
-        df = df.sort_values(["device_name", "time"], ascending=True)
-
-    write_history_csv(df)
-    write_history_json(df)
-    print_summary(df)
+    print("\nFinished writing all sensor history outputs.")
 
 
 if __name__ == "__main__":
