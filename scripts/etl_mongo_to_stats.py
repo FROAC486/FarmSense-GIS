@@ -27,13 +27,12 @@ DATA_DIR = BASE_DIR / "data"
 # =========================
 # TIME PERIOD CONFIG
 # =========================
+# Keep this lightweight for EC2.
+# 6m, 12m and all were removed because they were too heavy for the current server.
 PERIODS = {
     "24h": timedelta(hours=24),
     "7d": timedelta(days=7),
     "30d": timedelta(days=30),
-    "6m": timedelta(days=182),
-    "12m": timedelta(days=365),
-    "all": None
 }
 
 
@@ -364,9 +363,6 @@ def flatten_doc(doc):
 # MONGODB QUERY
 # =========================
 def build_time_query(period_delta):
-    if period_delta is None:
-        return {}
-
     now_utc = datetime.now(timezone.utc)
     start_time = now_utc - period_delta
 
@@ -380,147 +376,21 @@ def build_time_query(period_delta):
 def fetch_period_records(collection, period_name, period_delta):
     print(f"\nFetching records for: {period_name}")
 
-    if period_delta is None:
-        print("Time filter: whole record")
-    else:
-        now_utc = datetime.now(timezone.utc)
-        start_time = now_utc - period_delta
+    now_utc = datetime.now(timezone.utc)
+    start_time = now_utc - period_delta
 
-        print(f"Start time UTC: {start_time.isoformat()}")
-        print(f"End time UTC:   {now_utc.isoformat()}")
+    print(f"Start time UTC: {start_time.isoformat()}")
+    print(f"End time UTC:   {now_utc.isoformat()}")
 
     query = build_time_query(period_delta)
 
-    # Important:
-    # Do NOT sort in MongoDB for long date ranges.
-    # MongoDB can hit its 32MB memory sort limit.
-    # We fetch first, then sort later in Pandas.
+    # Do not sort in MongoDB.
+    # We fetch the filtered data, then sort later in pandas.
     docs = list(collection.find(query))
 
     print(f"Records found for {period_name}: {len(docs)}")
 
     return docs
-
-# =========================
-# LONG PERIOD DOWNSAMPLING
-# =========================
-def downsample_long_record(df):
-    if df.empty:
-        return df
-
-    if "time" not in df.columns:
-        return df
-
-    if len(df) <= 5000:
-        print("Long-period dataset is small enough. Keeping raw records.")
-        return df
-
-    print("Long-period dataset is large. Downsampling to hourly averages per sensor...")
-
-    df = df.copy()
-
-    df["parsed_time"] = pd.to_datetime(df["time"], errors="coerce", utc=True)
-    df = df.dropna(subset=["parsed_time"])
-
-    if df.empty:
-        return df.drop(columns=["parsed_time"], errors="ignore")
-
-    df["hour"] = df["parsed_time"].dt.floor("h")
-
-    graphable_columns = [
-        "temperature_c",
-        "humidity",
-        "air_temperature",
-        "air_humidity",
-        "pressure",
-        "wind_speed",
-        "wind_direction",
-        "wind_gust",
-        "rain_gauge",
-        "rain_accumulation",
-        "tank_air_gap_mm",
-        "tank_distance",
-        "tank_temp_c",
-        "battery_v",
-        "tank_battery_v",
-        "rssi",
-        "snr"
-    ]
-
-    existing_graphable_columns = [
-        col for col in graphable_columns
-        if col in df.columns
-    ]
-
-    metadata_columns = [
-        "mongo_id",
-        "time",
-        "iso",
-        "ts",
-        "topic",
-        "deduplication_id",
-        "tenant_name",
-        "application_name",
-        "device_profile_name",
-        "dev_eui",
-        "device_class",
-        "dev_addr",
-        "f_cnt",
-        "f_port",
-        "confirmed",
-        "adr",
-        "dr",
-        "region_config_id",
-        "site",
-        "sensor_latitude",
-        "sensor_longitude",
-        "sensor_altitude",
-        "raw_tags_json",
-        "gateway_id",
-        "door_status",
-        "digital_status",
-        "work_mode",
-        "raw_object_json",
-        "sensecap_payload_valid",
-        "sensecap_payload_hex",
-        "sensecap_err"
-    ]
-
-    existing_metadata_columns = [
-        col for col in metadata_columns
-        if col in df.columns
-    ]
-
-    for col in existing_graphable_columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    grouped_numeric = (
-        df
-        .groupby(["device_name", "hour"], dropna=False)[existing_graphable_columns]
-        .mean()
-        .reset_index()
-    )
-
-    grouped_meta = (
-        df
-        .sort_values("parsed_time")
-        .groupby(["device_name", "hour"], dropna=False)[existing_metadata_columns]
-        .last()
-        .reset_index()
-    )
-
-    result = pd.merge(
-        grouped_meta,
-        grouped_numeric,
-        on=["device_name", "hour"],
-        how="left"
-    )
-
-    result["time"] = result["hour"].dt.strftime("%Y-%m-%dT%H:%M:%S%z")
-
-    result = result.drop(columns=["hour"], errors="ignore")
-
-    return result
 
 
 # =========================
@@ -643,9 +513,6 @@ def process_period(collection, period_name, period_delta):
     if not df.empty and "time" in df.columns:
         df = df.sort_values(["device_name", "time"], ascending=True)
 
-    if period_name in ["6m", "12m", "all"]:
-        df = downsample_long_record(df)
-
     write_history_csv(df, period_name)
     write_history_json(df, period_name)
     print_summary(df, period_name)
@@ -661,7 +528,12 @@ def run_once():
             "Set it before running this script."
         )
 
-    client = MongoClient(URI, server_api=ServerApi("1"))
+    client = MongoClient(
+        URI,
+        server_api=ServerApi("1"),
+        serverSelectionTimeoutMS=15000
+    )
+
     client.admin.command("ping")
 
     print("Connected to MongoDB")
@@ -672,7 +544,7 @@ def run_once():
     for period_name, period_delta in PERIODS.items():
         process_period(collection, period_name, period_delta)
 
-    print("\nFinished writing all sensor history outputs.")
+    print("\nFinished writing selected sensor history outputs.")
 
 
 if __name__ == "__main__":
