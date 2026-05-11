@@ -338,6 +338,10 @@
           <label for="timeRangeSelect">Time period</label>
           <select id="timeRangeSelect">
             <option value="24h">Last 24 hours</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="6m">Last 6 months</option>
+            <option value="12m">Last 12 months</option>
           </select>
         </div>
       </div>
@@ -387,11 +391,19 @@
     const STATS_REFRESH_MS = 900000;
 
     const historyFiles = {
-      "24h": "sensor_history_24h.json"
+      "24h": "sensor_history_24h.json",
+      "7d": "sensor_history_7d.json",
+      "30d": "sensor_history_30d.json",
+      "6m": "sensor_history_6m.json",
+      "12m": "sensor_history_12m.json"
     };
 
     const historyLabels = {
-      "24h": "last 24 hours"
+      "24h": "last 24 hours",
+      "7d": "last 7 days",
+      "30d": "last 30 days",
+      "6m": "last 6 months",
+      "12m": "last 12 months"
     };
 
     // =========================
@@ -579,28 +591,28 @@
 
       const geojsonUrl = "sensor_latest.geojson?cache=" + Date.now();
 
-      Cesium.GeoJsonDataSource.load(geojsonUrl, { clampToGround: true })
-        .then(function (newDataSource) {
-          if (sensorDataSource) {
-            viewer.dataSources.remove(sensorDataSource);
-          }
+      Cesium.GeoJsonDataSource.load(geojsonUrl, {
+        clampToGround: true
+      }).then(function(newDataSource) {
+        if (sensorDataSource) {
+          viewer.dataSources.remove(sensorDataSource);
+        }
 
-          sensorDataSource = newDataSource;
-          viewer.dataSources.add(sensorDataSource);
+        sensorDataSource = newDataSource;
+        viewer.dataSources.add(sensorDataSource);
 
-          const entities = sensorDataSource.entities.values;
+        const entities = sensorDataSource.entities.values;
 
-          document.getElementById("sensorCount").innerText = "Sensors Online: " + entities.length;
-          document.getElementById("lastUpdated").innerText = "Last Updated: " + new Date().toLocaleString();
+        document.getElementById("sensorCount").innerText = "Sensors Online: " + entities.length;
+        document.getElementById("lastUpdated").innerText = "Last Updated: " + new Date().toLocaleString();
 
-          for (let i = 0; i < entities.length; i++) {
-            styleSensor(entities[i]);
-            buildPopup(entities[i]);
-          }
-        })
-        .catch(function (error) {
-          console.error("Error loading GeoJSON:", error);
-        });
+        for (let i = 0; i < entities.length; i++) {
+          styleSensor(entities[i]);
+          buildPopup(entities[i]);
+        }
+      }).catch(function(error) {
+        console.error("Error loading GeoJSON:", error);
+      });
     }
 
     // =========================
@@ -718,41 +730,91 @@
     }
 
     function populateSensorDropdown() {
-      const sensorSelect = document.getElementById("sensorSelect");
-      const uniqueSensors = {};
+  const sensorSelect = document.getElementById("sensorSelect");
+  const uniqueSensors = {};
 
-      sensorHistory.forEach(row => {
-        if (!row.device_name) {
-          return;
-        }
-
-        uniqueSensors[row.device_name] = getSensorLabel(row);
-      });
-
-      const currentValue = sensorSelect.value;
-      const deviceNames = Object.keys(uniqueSensors).sort();
-
-      sensorSelect.innerHTML = "";
-
-      if (deviceNames.length === 0) {
-        const option = document.createElement("option");
-        option.value = "";
-        option.textContent = "No sensors found";
-        sensorSelect.appendChild(option);
-        return;
-      }
-
-      deviceNames.forEach(deviceName => {
-        const option = document.createElement("option");
-        option.value = deviceName;
-        option.textContent = uniqueSensors[deviceName];
-        sensorSelect.appendChild(option);
-      });
-
-      if (deviceNames.includes(currentValue)) {
-        sensorSelect.value = currentValue;
-      }
+  sensorHistory.forEach(row => {
+    if (!row.device_name) {
+      return;
     }
+
+    uniqueSensors[row.device_name] = {
+      label: getSensorLabel(row),
+      profile: row.device_profile_name || "",
+      site: row.site || "",
+      device: row.device_name || ""
+    };
+  });
+
+  const currentValue = sensorSelect.value;
+
+  const sensorList = Object.values(uniqueSensors);
+
+  sensorList.sort((a, b) => {
+    function getPriority(sensor) {
+      const profile = sensor.profile;
+      const site = sensor.site.toLowerCase();
+
+      // Put weather station first
+      if (profile.includes("SenseCAP S2120")) {
+        return 1;
+      }
+
+      // Then normal paddock/environmental sensors
+      if (profile.includes("LSN50")) {
+        return 2;
+      }
+
+      // Then tank sensors
+      if (profile.includes("DDS75")) {
+        return 3;
+      }
+
+      // Then indoor/temp/humidity sensor
+      if (profile.includes("R711")) {
+        return 4;
+      }
+
+      // Put barometer lower down
+      if (profile.includes("Barometric Pressure") || site.includes("barometer")) {
+        return 5;
+      }
+
+      // Anything unknown goes last
+      return 99;
+    }
+
+    const priorityA = getPriority(a);
+    const priorityB = getPriority(b);
+
+    if (priorityA !== priorityB) {
+      return priorityA - priorityB;
+    }
+
+    return a.label.localeCompare(b.label);
+  });
+
+  sensorSelect.innerHTML = "";
+
+  if (sensorList.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No sensors found";
+    sensorSelect.appendChild(option);
+    return;
+  }
+
+  sensorList.forEach(sensor => {
+    const option = document.createElement("option");
+    option.value = sensor.device;
+    option.textContent = sensor.label;
+    sensorSelect.appendChild(option);
+  });
+
+  if (sensorList.some(sensor => sensor.device === currentValue)) {
+    sensorSelect.value = currentValue;
+  }
+}
 
     function populateMetricDropdownForSensor() {
       const sensorSelect = document.getElementById("sensorSelect");
@@ -819,12 +881,48 @@
     }
 
     function formatChartLabel(timeValue) {
+      const selectedRange = getSelectedTimeRange();
       const date = new Date(timeValue);
 
-      return date.toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit"
+      if (selectedRange === "24h") {
+        return date.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit"
+        });
+      }
+
+      if (selectedRange === "7d" || selectedRange === "30d") {
+        return date.toLocaleString([], {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit"
+        });
+      }
+
+      return date.toLocaleDateString([], {
+        year: "2-digit",
+        month: "short",
+        day: "numeric"
       });
+    }
+
+    function getXAxisTickSettings() {
+      const selectedRange = getSelectedTimeRange();
+
+      if (selectedRange === "24h") {
+        return {
+          autoSkip: false,
+          maxRotation: 45,
+          minRotation: 45
+        };
+      }
+
+      return {
+        autoSkip: true,
+        maxTicksLimit: 12,
+        maxRotation: 45,
+        minRotation: 45
+      };
     }
 
     function updateChart() {
@@ -918,7 +1016,7 @@
             label: metricName,
             data: values,
             borderWidth: 2,
-            pointRadius: 4,
+            pointRadius: selectedRange === "24h" ? 4 : 2,
             pointHoverRadius: 7,
             hitRadius: 14,
             tension: 0.25
@@ -959,11 +1057,7 @@
                 display: true,
                 text: "Time"
               },
-              ticks: {
-                autoSkip: false,
-                maxRotation: 45,
-                minRotation: 45
-              }
+              ticks: getXAxisTickSettings()
             },
             y: {
               title: {
