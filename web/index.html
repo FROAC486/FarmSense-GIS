@@ -44,6 +44,46 @@
       line-height: 1.4;
     }
 
+    #sidebarToggle {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      background: transparent;
+      color: white;
+      border: none;
+      font-size: 24px;
+      cursor: pointer;
+      line-height: 1;
+    }
+
+    #sidebarToggle:hover {
+      color: #cccccc;
+    }
+
+    #appHeader.collapsed {
+      width: 54px;
+      height: 54px;
+      padding: 0;
+      overflow: hidden;
+    }
+
+    #appHeader.collapsed h2,
+    #appHeader.collapsed p,
+    #appHeader.collapsed select {
+      display: none;
+    }
+
+    #appHeader.collapsed #sidebarToggle {
+      top: 12px;
+      right: 16px;
+      font-size: 0;
+    }
+
+    #appHeader.collapsed #sidebarToggle::after {
+      content: "☰";
+      font-size: 26px;
+    }
+
     #viewSelect {
       width: 100%;
       margin-top: 10px;
@@ -102,6 +142,7 @@
     #statsView {
       color: white;
       overflow-y: auto;
+      overflow-x: hidden;
       box-sizing: border-box;
       padding: 115px 28px 28px 28px;
       background: linear-gradient(135deg, #141414, #222);
@@ -109,7 +150,7 @@
 
     #statsPanel {
       max-width: 1200px;
-      margin-left: 260px;
+      margin-left: 360px;
       margin-right: auto;
       background: rgba(0, 0, 0, 0.55);
       padding: 20px;
@@ -117,8 +158,14 @@
       box-sizing: border-box;
     }
 
+    body.sidebar-collapsed #statsPanel {
+      margin-left: auto;
+      margin-right: auto;
+    }
+
     #statsPanel h2 {
       margin: 0 0 6px 0;
+      font-size: 25px;
     }
 
     #statsPanel p {
@@ -193,14 +240,36 @@
       height: 100%;
     }
 
+    @media (max-width: 1100px) {
+      #statsPanel {
+        margin-left: 380px;
+        max-width: calc(100% - 400px);
+      }
+
+      body.sidebar-collapsed #statsPanel {
+        max-width: 1200px;
+        margin-left: auto;
+        margin-right: auto;
+      }
+
+      #statsCards {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
     @media (max-width: 900px) {
       #appHeader {
         width: calc(100% - 30px);
       }
 
+      #statsView {
+        padding-top: 220px;
+      }
+
       #statsPanel {
         margin-left: auto;
         margin-right: auto;
+        max-width: 100%;
       }
 
       #statsControls {
@@ -216,6 +285,8 @@
 
 <body>
   <div id="appHeader">
+    <button id="sidebarToggle" title="Collapse panel">×</button>
+
     <h2>FarmSense GIS</h2>
 
     <p>Cloud-based IoT sensor monitoring for farm environmental conditions.</p>
@@ -267,11 +338,6 @@
           <label for="timeRangeSelect">Time period</label>
           <select id="timeRangeSelect">
             <option value="24h">Last 24 hours</option>
-            <option value="7d">Last 7 days</option>
-            <option value="30d">Last 30 days</option>
-            <option value="6m">Last 6 months</option>
-            <option value="12m">Last 12 months</option>
-            <option value="all">Whole record</option>
           </select>
         </div>
       </div>
@@ -321,22 +387,27 @@
     const STATS_REFRESH_MS = 900000;
 
     const historyFiles = {
-      "24h": "sensor_history_24h.json",
-      "7d": "sensor_history_7d.json",
-      "30d": "sensor_history_30d.json",
-      "6m": "sensor_history_6m.json",
-      "12m": "sensor_history_12m.json",
-      "all": "sensor_history_all.json"
+      "24h": "sensor_history_24h.json"
     };
 
     const historyLabels = {
-      "24h": "last 24 hours",
-      "7d": "last 7 days",
-      "30d": "last 30 days",
-      "6m": "last 6 months",
-      "12m": "last 12 months",
-      "all": "whole record"
+      "24h": "last 24 hours"
     };
+
+    // =========================
+    // SIDEBAR TOGGLE
+    // =========================
+    const appHeader = document.getElementById("appHeader");
+    const sidebarToggle = document.getElementById("sidebarToggle");
+
+    sidebarToggle.addEventListener("click", function () {
+      appHeader.classList.toggle("collapsed");
+      document.body.classList.toggle("sidebar-collapsed");
+
+      if (sensorChart) {
+        setTimeout(() => sensorChart.resize(), 150);
+      }
+    });
 
     // =========================
     // VIEW SWITCHING
@@ -748,19 +819,9 @@
     }
 
     function formatChartLabel(timeValue) {
-      const selectedRange = getSelectedTimeRange();
       const date = new Date(timeValue);
 
-      if (selectedRange === "24h") {
-        return date.toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit"
-        });
-      }
-
-      return date.toLocaleString([], {
-        month: "short",
-        day: "numeric",
+      return date.toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit"
       });
@@ -857,26 +918,51 @@
             label: metricName,
             data: values,
             borderWidth: 2,
-            pointRadius: graphRecords.length > 300 ? 0 : 3,
+            pointRadius: 4,
+            pointHoverRadius: 7,
+            hitRadius: 14,
             tension: 0.25
           }]
         },
         options: {
           responsive: true,
           maintainAspectRatio: false,
+
+          interaction: {
+            mode: "nearest",
+            axis: "x",
+            intersect: false
+          },
+
           plugins: {
             legend: {
               display: true
+            },
+            tooltip: {
+              enabled: true,
+              mode: "nearest",
+              intersect: false,
+              callbacks: {
+                title: function(context) {
+                  return "Time: " + context[0].label;
+                },
+                label: function(context) {
+                  return metricName + ": " + context.parsed.y;
+                }
+              }
             }
           },
+
           scales: {
             x: {
               title: {
                 display: true,
-                text: selectedRange === "24h" ? "Time" : "Date / Time"
+                text: "Time"
               },
               ticks: {
-                maxTicksLimit: 12
+                autoSkip: false,
+                maxRotation: 45,
+                minRotation: 45
               }
             },
             y: {
